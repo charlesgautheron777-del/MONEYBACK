@@ -1,0 +1,67 @@
+name: MONEYBACK validation
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Validate required files
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f vercel.json
+          for f in marketing/index.html marketing/checkout.html marketing/payment-success.html marketing/audit-upload.html marketing/audit-status.html marketing/account.html; do
+            test -f "$f"
+          done
+      - name: Validate JSON
+        run: node -e "JSON.parse(require('fs').readFileSync('vercel.json','utf8'))"
+      - name: Validate inline JavaScript
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs=require('fs'),cp=require('child_process'),os=require('os'),path=require('path');
+          const files=fs.readdirSync('marketing').filter(f=>f.endsWith('.html'));
+          let failed=false;
+          for(const file of files){
+            const html=fs.readFileSync(path.join('marketing',file),'utf8');
+            const scripts=[...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)].map(m=>m[1]).filter(s=>s.trim());
+            scripts.forEach((src,i)=>{
+              const tmp=path.join(os.tmpdir(),`moneyback-${process.pid}-${i}.js`);
+              fs.writeFileSync(tmp,src);
+              const r=cp.spawnSync(process.execPath,['--check',tmp],{encoding:'utf8'});
+              if(r.status!==0){console.error(`JavaScript syntax error: ${file} (script ${i+1})`);console.error(r.stderr||r.stdout);failed=true;}
+              fs.unlinkSync(tmp);
+            });
+          }
+          if(failed)process.exit(1);
+          console.log(`Validated inline JavaScript in ${files.length} HTML files.`);
+          NODE
+      - name: Security smoke checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -RInE 'SUPABASE_(SERVICE_ROLE_KEY|SECRET_KEY)' marketing --include='*.html'; then
+            echo 'ERROR: server-only Supabase credentials detected in frontend files.'
+            exit 1
+          fi
+          if grep -RInE 'sk_(live|test)_[A-Za-z0-9]+' marketing --include='*.html'; then
+            echo 'ERROR: Stripe secret key detected in frontend files.'
+            exit 1
+          fi
+          if grep -RInE 'rk_(live|test)_[A-Za-z0-9]+' marketing --include='*.html'; then
+            echo 'ERROR: Stripe restricted key detected in frontend files.'
+            exit 1
+          fi
+          grep -q 'public-config' marketing/account.html
+          grep -q 'sessionStorage' marketing/account.html
+          echo 'Security smoke checks passed.'
